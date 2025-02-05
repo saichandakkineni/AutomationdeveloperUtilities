@@ -37,273 +37,131 @@ enum DeviceType {
 struct ContentView: View {
     @StateObject private var deviceManager = DeviceManager.shared
     @State private var selectedDevice: Device?
-    @State private var isShowingAppPicker = false
     @State private var isPerformingAction = false
     @State private var actionError: String?
-    @State private var isShowingCustomCommandPrompt = false
-    @State private var customCommand = ""
-    @State private var isShowingBundleIdPrompt = false
-    @State private var bundleIdToReset = ""
+    @State private var showingBundleIdPrompt = false
+    @State private var bundleId = ""
+    @State private var isRecording = false
+    @State private var navigationPath = NavigationPath()
     
     var body: some View {
         NavigationSplitView {
-            // Sidebar
+            // Device List
             List(deviceManager.devices, selection: $selectedDevice) { device in
                 DeviceRow(device: device)
+                    .tag(device)
             }
             .navigationTitle("Devices")
-            .overlay {
-                if deviceManager.devices.isEmpty {
-                    ContentUnavailableView(
-                        "No Devices Found",
-                        systemImage: "devices",
-                        description: Text("Connect an iOS or Android device to get started")
-                    )
-                }
-            }
         } detail: {
             if let device = selectedDevice {
-                TabView {
-                    // Detail view
-                    DeviceDetailView(device: device)
-                    
-                    // Add crash analyzer tab
-                    CrashAnalyzerView()
-                        .tabItem {
-                            Label("Crash Analyzer", systemImage: "exclamationmark.triangle")
+                NavigationStack(path: $navigationPath) {
+                    // Device Detail View
+                    ScrollView {
+                        VStack(spacing: 24) {
+                            // Device Info
+                            GroupBox("Device Information") {
+                                ForEach(Array(device.properties.sorted(by: { $0.key < $1.key })), id: \.key) { key, value in
+                                    InfoRow(key, value)
+                                }
+                            }
+                            
+                            // Actions
+                            GroupBox("Actions") {
+                                VStack(spacing: 16) {
+                                    // App Installation
+                                    AppInstallDropZone(device: device)
+                                    
+                                    // Screen Recording
+                                    NavigationLink(value: DeviceAction.screenRecording) {
+                                        ActionButton(
+                                            title: "Screen Recording",
+                                            icon: "record.circle",
+                                            isLoading: isPerformingAction
+                                        )
+                                    }
+                                    
+                                    // Device Logs
+                                    NavigationLink(value: DeviceAction.logs) {
+                                        ActionButton(
+                                            title: "View Device Logs",
+                                            icon: "doc.text.magnifyingglass",
+                                            isLoading: isPerformingAction
+                                        )
+                                    }
+                                    
+                                    // Crash Analyzer
+                                    NavigationLink(value: DeviceAction.crashAnalyzer) {
+                                        ActionButton(
+                                            title: "Crash Analyzer",
+                                            icon: "exclamationmark.triangle",
+                                            isLoading: isPerformingAction
+                                        )
+                                    }
+                                    
+                                    // Clear App Data
+                                    Button {
+                                        showingBundleIdPrompt = true
+                                    } label: {
+                                        ActionButton(
+                                            title: "Clear App Data",
+                                            icon: "trash",
+                                            isLoading: isPerformingAction
+                                        )
+                                    }
+                                    
+                                    // Restart Device
+                                    Button {
+                                        Task {
+                                            await restartDevice(device)
+                                        }
+                                    } label: {
+                                        ActionButton(
+                                            title: "Restart Device",
+                                            icon: "arrow.clockwise",
+                                            isLoading: isPerformingAction
+                                        )
+                                    }
+                                }
+                            }
+                            
+                            if let error = actionError {
+                                Text(error)
+                                    .foregroundStyle(.red)
+                                    .font(.caption)
+                            }
                         }
-                    
-                    // Custom Commands section
-                    GroupBox("Custom Commands") {
-                        ActionButton(
-                            title: "Execute Command",
-                            icon: "terminal",
-                            isLoading: isPerformingAction
-                        ) {
-                            isShowingCustomCommandPrompt = true
+                        .padding()
+                    }
+                    .navigationDestination(for: DeviceAction.self) { action in
+                        switch action {
+                        case .screenRecording:
+                            ScreenRecordingView(device: device)
+                        case .logs:
+                            LogViewer(device: device)
+                        case .crashAnalyzer:
+                            CrashAnalyzerView()
+                        }
+                    }
+                }
+                .navigationTitle(device.name)
+                .sheet(isPresented: $showingBundleIdPrompt) {
+                    BundleIdPromptView(bundleId: $bundleId) { bundleId in
+                        Task {
+                            await clearAppData(bundleId: bundleId, for: device)
                         }
                     }
                 }
             } else {
-                Text("Select a device")
-                    .foregroundStyle(.secondary)
-            }
-        }
-        .frame(minWidth: 600, minHeight: 400)
-        .toolbar {
-            ToolbarItem {
-                Button(action: { deviceManager.startDeviceScan() }) {
-                    Label("Refresh", systemImage: "arrow.clockwise")
-                }
-            }
-        }
-        .sheet(isPresented: $isShowingBundleIdPrompt) {
-            BundleIdPromptView(bundleId: $bundleIdToReset) { bundleId in
-                Task {
-                    await clearAppData(bundleId: bundleId, for: selectedDevice!)
-                }
-            }
-        }
-        .sheet(isPresented: $isShowingCustomCommandPrompt) {
-            CustomCommandView(command: $customCommand) { command in
-                Task {
-                    do {
-                        if let device = selectedDevice {
-                            try await DeviceManager.shared.executeCommand(on: device, command: command)
-                        }
-                    } catch {
-                        await MainActor.run {
-                            actionError = error.localizedDescription
-                        }
-                    }
-                }
-            }
-        }
-        .alert("Error", isPresented: .constant(actionError != nil)) {
-            Button("OK") {
-                actionError = nil
-            }
-        } message: {
-            Text(actionError ?? "")
-        }
-    }
-    
-    private func executeCustomCommand(for device: Device) {
-        let commandPrompt = CustomCommandView(command: .constant("")) { command in
-            Task {
-                do {
-                    try await DeviceManager.shared.executeCommand(on: device, command: command)
-                } catch {
-                    await MainActor.run {
-                        actionError = error.localizedDescription
-                    }
-                }
-            }
-        }
-        
-        presentSheet(commandPrompt)
-    }
-    
-    private func presentSheet(_ sheet: some View) {
-        // Implementation of presentSheet function
-    }
-    
-    private func clearAppData(bundleId: String, for device: Device) async {
-        isPerformingAction = true
-        defer { isPerformingAction = false }
-        
-        do {
-            try await DeviceManager.shared.clearAppData(device, bundleId: bundleId)
-        } catch {
-            actionError = error.localizedDescription
-        }
-    }
-}
-
-// Device row in sidebar
-struct DeviceRow: View {
-    let device: Device
-    
-    var body: some View {
-        Label {
-            VStack(alignment: .leading) {
-                Text(device.name)
-                    .font(.headline)
-                Text(device.status)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-        } icon: {
-            Image(systemName: device.type.imageName)
-                .foregroundStyle(device.type == .ios ? .blue : .green)
-        }
-        .padding(.vertical, 4)
-    }
-}
-
-// Detail view showing device actions
-struct DeviceDetailView: View {
-    let device: Device
-    @State private var isPerformingAction = false
-    @State private var actionError: String?
-    @State private var selectedTab = 0
-    @State private var isRecording = false
-    @State private var isShowingCustomCommandPrompt = false
-    @State private var customCommand = ""
-    @State private var isShowingBundleIdPrompt = false
-    @State private var bundleIdToReset = ""
-    
-    var body: some View {
-        TabView(selection: $selectedTab) {
-            // Actions tab
-            ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    // Device info
-                    VStack(alignment: .leading) {
-                        Text(device.name)
-                            .font(.title)
-                        Text(device.status)
-                            .foregroundStyle(.secondary)
-                    }
-                    .padding(.bottom)
-                    
-                    // App installation section
-                    GroupBox("App Installation") {
-                        AppInstallDropZone(device: device)
-                    }
-                    
-                    // Device Control
-                    GroupBox("Device Control") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ActionButton(
-                                title: "Restart Device",
-                                icon: "arrow.clockwise",
-                                isLoading: isPerformingAction
-                            ) {
-                                Task {
-                                    await restartDevice()
-                                }
-                            }
-                            
-                            ActionButton(
-                                title: "Clear App Data",
-                                icon: "trash",
-                                isLoading: isPerformingAction
-                            ) {
-                                isShowingBundleIdPrompt = true
-                            }
-                        }
-                    }
-                    
-                    // Media Actions
-                    GroupBox("Media Actions") {
-                        VStack(alignment: .leading, spacing: 12) {
-                            ActionButton(
-                                title: "Capture Screenshot",
-                                icon: "camera",
-                                isLoading: isPerformingAction
-                            ) {
-                                Task {
-                                    await captureScreenshot()
-                                }
-                            }
-                            
-                            // Add screen recording view
-                            ScreenRecordingView(device: device)
-                        }
-                    }
-                }
-                .padding()
-            }
-            .tabItem {
-                Label("Actions", systemImage: "gear")
-            }
-            .tag(0)
-            
-            // Logs tab
-            LogViewer(device: device)
-                .tabItem {
-                    Label("Logs", systemImage: "doc.text")
-                }
-                .tag(1)
-        }
-        .padding()
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .sheet(isPresented: $isShowingBundleIdPrompt) {
-            BundleIdPromptView(bundleId: $bundleIdToReset) { bundleId in
-                Task {
-                    await clearAppData(bundleId: bundleId, for: device)
-                }
-            }
-        }
-        .sheet(isPresented: $isShowingCustomCommandPrompt) {
-            CustomCommandView(command: $customCommand) { command in
-                Task {
-                    do {
-                        try await DeviceManager.shared.executeCommand(on: device, command: command)
-                    } catch {
-                        await MainActor.run {
-                            actionError = error.localizedDescription
-                        }
-                    }
+                ContentUnavailableView {
+                    Label("No Device Selected", systemImage: "iphone")
+                } description: {
+                    Text("Select a device to view details and perform actions")
                 }
             }
         }
     }
     
-    private func captureScreenshot() async {
-        isPerformingAction = true
-        defer { isPerformingAction = false }
-        
-        do {
-            let screenshotURL = try await DeviceManager.shared.captureScreenshot(of: device)
-            // Handle the screenshot - maybe show it in a preview window
-        } catch {
-            actionError = error.localizedDescription
-        }
-    }
-    
-    private func restartDevice() async {
+    private func restartDevice(_ device: Device) async {
         isPerformingAction = true
         defer { isPerformingAction = false }
         
@@ -314,45 +172,48 @@ struct DeviceDetailView: View {
         }
     }
     
-    private func toggleRecording() async {
-        isPerformingAction = true
-        defer { isPerformingAction = false }
-        
-        do {
-            if isRecording {
-                // Stop recording logic
-                isRecording = false
-            } else {
-                let recordingURL = try await DeviceManager.shared.recordScreen(of: device)
-                isRecording = true
-                // Handle recording URL (maybe show in Finder)
-            }
-        } catch {
-            actionError = error.localizedDescription
-        }
-    }
-    
     private func clearAppData(bundleId: String, for device: Device) async {
         isPerformingAction = true
         defer { isPerformingAction = false }
         
         do {
-            try await DeviceManager.shared.clearAppData(device, bundleId: bundleId)
+            try await DeviceManager.shared.clearAppData(device: device, bundleId: bundleId)
         } catch {
             actionError = error.localizedDescription
         }
     }
 }
 
-// Reusable action button
+enum DeviceAction: Hashable {
+    case screenRecording
+    case logs
+    case crashAnalyzer
+}
+
+// Helper Views
+struct DeviceRow: View {
+    let device: Device
+    
+    var body: some View {
+        HStack {
+            Image(systemName: device.type == .ios ? "iphone" : "android2")
+            VStack(alignment: .leading) {
+                Text(device.name)
+                Text(device.status)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
 struct ActionButton: View {
     let title: String
     let icon: String
     let isLoading: Bool
-    let action: () -> Void
     
     var body: some View {
-        Button(action: action) {
+        HStack {
             Label {
                 Text(title)
                     .frame(maxWidth: 200, alignment: .leading)
@@ -365,6 +226,7 @@ struct ActionButton: View {
                 }
             }
         }
+        .frame(maxWidth: .infinity)
         .buttonStyle(.bordered)
         .controlSize(.large)
         .disabled(isLoading)

@@ -44,165 +44,140 @@ class LogManager: ObservableObject {
     
     func startCapturing(for device: Device) {
         guard !isCapturing else { return }
-        isCapturing = true
         
-        Task {
-            do {
-                switch device.type {
-                case .ios:
-                    try await captureIOSLogs(device: device)
-                case .android:
-                    try await captureAndroidLogs(device: device)
-                }
-            } catch {
-                logger.error("Failed to start log capture: \(error.localizedDescription)")
-            }
+        do {
+            let process = try createLogProcess(for: device)
+            logProcesses[device.identifier] = process
+            isCapturing = true
+        } catch {
+            logger.error("Failed to start log capture: \(error.localizedDescription)")
         }
     }
     
     func stopCapturing(for device: Device) {
-        logProcesses[device.identifier]?.terminate()
+        guard let process = logProcesses[device.identifier] else { return }
+        process.terminate()
         logProcesses.removeValue(forKey: device.identifier)
         isCapturing = false
     }
     
-    private func captureIOSLogs(device: Device) async throws {
+    private func createLogProcess(for device: Device) throws -> Process {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["devicectl", "device", "console", device.identifier]
+        let pipe = Pipe()
         
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
+        if device.type == .ios {
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+            process.arguments = ["simctl", "spawn", device.identifier, "log", "stream", "--level", "debug"]
+        } else {
+            process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
+            process.arguments = ["-s", device.identifier, "logcat", "*:D"]
+        }
+        
+        process.standardOutput = pipe
+        
+        pipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            guard let data = try? handle.read(upToCount: 1024),
+                  let line = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !line.isEmpty else { return }
+            
+            DispatchQueue.main.async {
+                self?.processLogLine(line, for: device)
+            }
+        }
         
         try process.run()
-        logProcesses[device.identifier] = process
-        
-        for try await line in outputPipe.fileHandleForReading.bytes.lines {
-            await parseiOSLog(line, deviceId: device.identifier)
-        }
+        return process
     }
     
-    private func captureAndroidLogs(device: Device) async throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/local/bin/adb")
-        process.arguments = ["-s", device.identifier, "logcat", "-v", "threadtime"]
-        
-        let outputPipe = Pipe()
-        process.standardOutput = outputPipe
-        
-        try process.run()
-        logProcesses[device.identifier] = process
-        
-        for try await line in outputPipe.fileHandleForReading.bytes.lines {
-            await parseAndroidLog(line, deviceId: device.identifier)
-        }
-    }
-    
-    @MainActor
-    private func parseiOSLog(_ line: String, deviceId: String) {
-        // Parse iOS console log format
-        let components = line.components(separatedBy: " ")
-        guard components.count >= 4 else { return }
-        
-        let dateStr = components[0] + " " + components[1]
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
-        
-        guard let timestamp = formatter.date(from: dateStr) else { return }
-        
-        let level: LogLevel = components[2].contains("[Error]") ? .error :
-                            components[2].contains("[Warning]") ? .warning :
-                            components[2].contains("[Info]") ? .info : .debug
-        
-        let message = components[3...].joined(separator: " ")
-        
-        let entry = LogEntry(
-            timestamp: timestamp,
-            level: level,
-            tag: components[2],
-            message: message,
-            deviceId: deviceId
-        )
-        
+    private func processLogLine(_ line: String, for device: Device) {
+        let entry = parseLogLine(line, deviceId: device.identifier)
         logs.append(entry)
-        if logs.count > 10000 { // Limit buffer size
-            logs.removeFirst(1000)
+        
+        // Keep only last 1000 logs for memory efficiency
+        if logs.count > 1000 {
+            logs.removeFirst(logs.count - 1000)
         }
     }
     
-    @MainActor
-    private func parseAndroidLog(_ line: String, deviceId: String) {
-        // Parse Android logcat format
-        let components = line.components(separatedBy: " ").filter { !$0.isEmpty }
-        guard components.count >= 7 else { return }
+    private func parseLogLine(_ line: String, deviceId: String) -> LogEntry {
+        // Basic parsing logic - enhance based on actual log format
+        let components = line.components(separatedBy: " ")
+        let level: LogLevel = components.first?.first.flatMap { char in
+            LogLevel.allCases.first { $0.rawValue == String(char) }
+        } ?? .info
         
-        let dateStr = components[0] + " " + components[1]
-        let formatter = DateFormatter()
-        formatter.dateFormat = "MM-dd HH:mm:ss.SSS"
+        let tag = components.count > 2 ? components[1] : "System"
+        let message = components.dropFirst(2).joined(separator: " ")
         
-        guard let timestamp = formatter.date(from: dateStr) else { return }
-        
-        let level = LogLevel(rawValue: components[4]) ?? .info
-        let tag = components[5]
-        let message = components[6...].joined(separator: " ")
-        
-        let entry = LogEntry(
-            timestamp: timestamp,
+        return LogEntry(
+            timestamp: Date(),
             level: level,
             tag: tag,
             message: message,
             deviceId: deviceId
         )
-        
-        logs.append(entry)
-        if logs.count > 10000 { // Limit buffer size
-            logs.removeFirst(1000)
-        }
     }
 }
 
 struct LogViewer: View {
+    @Environment(\.dismiss) private var dismiss
     let device: Device
     @StateObject private var logManager = LogManager()
+    @State private var selectedLogLevel: LogLevel?
     @State private var searchText = ""
-    @State private var selectedLevels: Set<LogLevel> = Set(LogLevel.allCases)
     @State private var autoScroll = true
+    @State private var isSaving = false
     
     var filteredLogs: [LogEntry] {
         logManager.logs.filter { log in
+            let matchesLevel = selectedLogLevel == nil || log.level == selectedLogLevel
             let matchesSearch = searchText.isEmpty || 
                 log.message.localizedCaseInsensitiveContains(searchText) ||
                 log.tag.localizedCaseInsensitiveContains(searchText)
-            let matchesLevel = selectedLevels.contains(log.level)
-            return matchesSearch && matchesLevel && log.deviceId == device.identifier
+            return matchesLevel && matchesSearch && log.deviceId == device.identifier
         }
     }
     
     var body: some View {
         VStack {
-            // Toolbar
+            // Back button
             HStack {
-                TextField("Search logs...", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
+                Button(action: { dismiss() }) {
+                    Label("Back", systemImage: "chevron.left")
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+            }
+            .padding(.horizontal)
+            
+            // Controls
+            HStack {
+                // Log level filter
+                Picker("Log Level", selection: $selectedLogLevel) {
+                    Text("All").tag(nil as LogLevel?)
+                    ForEach(LogLevel.allCases, id: \.self) { level in
+                        Text(level.rawValue).tag(level as LogLevel?)
+                    }
+                }
+                .frame(width: 100)
                 
-                ForEach(LogLevel.allCases, id: \.rawValue) { level in
-                    Toggle(level.rawValue, isOn: .init(
-                        get: { selectedLevels.contains(level) },
-                        set: { isOn in
-                            if isOn {
-                                selectedLevels.insert(level)
-                            } else {
-                                selectedLevels.remove(level)
-                            }
-                        }
-                    ))
-                    .toggleStyle(.button)
-                    .tint(level.color)
+                // Search
+                HStack {
+                    Image(systemName: "magnifyingglass")
+                        .foregroundStyle(.secondary)
+                    TextField("Search logs...", text: $searchText)
+                }
+                .padding(6)
+                .background {
+                    RoundedRectangle(cornerRadius: 8)
+                        .fill(.secondary.opacity(0.1))
                 }
                 
+                // Auto-scroll toggle
                 Toggle("Auto-scroll", isOn: $autoScroll)
                     .toggleStyle(.switch)
                 
+                // Start/Stop button
                 Button(logManager.isCapturing ? "Stop" : "Start") {
                     if logManager.isCapturing {
                         logManager.stopCapturing(for: device)
@@ -211,6 +186,13 @@ struct LogViewer: View {
                     }
                 }
                 .buttonStyle(.bordered)
+                
+                // Add Save button
+                Button(action: saveLogFile) {
+                    Label("Save Logs", systemImage: "square.and.arrow.down")
+                }
+                .buttonStyle(.bordered)
+                .disabled(filteredLogs.isEmpty || isSaving)
             }
             .padding()
             
@@ -221,15 +203,51 @@ struct LogViewer: View {
                         LogEntryRow(entry: log)
                     }
                 }
+                .padding(.horizontal)
             }
             .id("LogScrollView")
             .font(.system(.body, design: .monospaced))
             .onChange(of: filteredLogs.count) {
                 if autoScroll {
-                    // Scroll to bottom when new logs arrive
-                    NSScrollView.scrollToBottom(identifier: "LogScrollView")
+                    scrollToBottom()
                 }
             }
+        }
+        .navigationBarBackButtonHidden(true)
+    }
+    
+    private func scrollToBottom() {
+        DispatchQueue.main.async {
+            NSScrollView.scrollToBottom(identifier: "LogScrollView")
+        }
+    }
+    
+    private func saveLogFile() {
+        isSaving = true
+        
+        let dateFormatter = DateFormatter()
+        dateFormatter.dateFormat = "yyyyMMdd_HHmmss"
+        let timestamp = dateFormatter.string(from: Date())
+        
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.log, .text]
+        panel.nameFieldStringValue = "device_logs_\(timestamp).log"
+        
+        panel.begin { response in
+            if response == .OK, let exportURL = panel.url {
+                do {
+                    var logContent = ""
+                    for log in filteredLogs {
+                        logContent += "[\(log.formattedTimestamp)] [\(log.level.rawValue)] [\(log.tag)]: \(log.message)\n"
+                    }
+                    try logContent.write(to: exportURL, atomically: true, encoding: .utf8)
+                    NSWorkspace.shared.activateFileViewerSelecting([exportURL])
+                } catch {
+                    // Handle error
+                    print("Failed to save logs: \(error.localizedDescription)")
+                }
+            }
+            isSaving = false
         }
     }
 }

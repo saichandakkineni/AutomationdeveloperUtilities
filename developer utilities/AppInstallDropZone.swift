@@ -7,12 +7,15 @@ struct AppInstallDropZone: View {
     @State private var isInstalling = false
     @State private var installError: String?
     
-    // Supported file types
-    private let supportedTypes = [
-        UTType("com.apple.iphone.ipa")!, // IPA files
-        UTType("application.vnd.android.package-archive")!, // APK files
-        .application // General apps
-    ]
+    // Updated supported file types with correct UTTypes
+    private var supportedTypes: [UTType] {
+        if device.type == .ios {
+            return [UTType.ipa].compactMap { $0 }
+        } else {
+            // For Android, we'll accept any file that ends with .apk
+            return [.data]
+        }
+    }
     
     var body: some View {
         VStack(spacing: 16) {
@@ -51,23 +54,28 @@ struct AppInstallDropZone: View {
             }
         }
         .padding()
-        .onDrop(of: supportedTypes, isTargeted: $isDropTargeted) { providers in
-            Task {
-                await handleDrop(providers)
+        .dropDestination(
+            for: URL.self,
+            action: { urls, location in
+                Task {
+                    await handleDroppedURLs(urls)
+                }
+                return true
+            },
+            isTargeted: { isTargeted in
+                isDropTargeted = isTargeted
             }
-            return true
-        }
+        )
     }
     
-    private func handleDrop(_ providers: [NSItemProvider]) async {
-        guard let provider = providers.first else { return }
+    private func handleDroppedURLs(_ urls: [URL]) async {
+        guard let url = urls.first else { return }
         
-        // Verify file type matches device type
-        let validTypes = device.type == .ios ? 
-            [UTType("com.apple.iphone.ipa")!] :
-            [UTType("application.vnd.android.package-archive")!]
+        // Verify file extension
+        let fileExtension = url.pathExtension.lowercased()
+        let isValidFile = device.type == .ios ? fileExtension == "ipa" : fileExtension == "apk"
         
-        guard provider.hasItemConformingToTypeIdentifier(validTypes[0].identifier) else {
+        guard isValidFile else {
             installError = "Invalid file type for \(device.type == .ios ? "iOS" : "Android") device"
             return
         }
@@ -76,9 +84,7 @@ struct AppInstallDropZone: View {
         installError = nil
         
         do {
-            let url = try await provider.loadItem(forTypeIdentifier: validTypes[0].identifier, options: nil) as! URL
             try await DeviceManager.shared.installApp(on: device, appPath: url.path)
-            
             // Success feedback
             NSHapticFeedbackManager.defaultPerformer.perform(.generic, performanceTime: .default)
         } catch {
@@ -86,5 +92,12 @@ struct AppInstallDropZone: View {
         }
         
         isInstalling = false
+    }
+}
+
+// Add UTType extension for IPA files
+extension UTType {
+    static var ipa: UTType? {
+        UTType("com.apple.itunes.ipa")
     }
 } 

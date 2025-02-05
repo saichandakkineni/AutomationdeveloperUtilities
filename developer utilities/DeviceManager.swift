@@ -28,6 +28,9 @@ class DeviceManager: ObservableObject {
     private var recordingProcesses: [String: Process] = [:]
     private var recordingPaths: [String: URL] = [:]
     
+    // Update ADB path
+    private let adbPath = "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb"
+    
     init() {
         startDeviceScan()
     }
@@ -45,20 +48,40 @@ class DeviceManager: ObservableObject {
     }
     
     private func scanForDevices() {
-        // Scan for iOS devices using xcrun
         Task {
             do {
-                let iosDevices = try await scanIOSDevices()
-                let androidDevices = try await scanAndroidDevices()
+                var allDevices: [Device] = []
+                var errors: [String] = []
                 
+                // Scan for iOS devices
+                do {
+                    let iosDevices = try await scanIOSDevices()
+                    allDevices.append(contentsOf: iosDevices)
+                } catch {
+                    errors.append("iOS scan error: \(error.localizedDescription)")
+                }
+                
+                // Scan for Android devices
+                do {
+                    let androidDevices = try await scanAndroidDevices()
+                    allDevices.append(contentsOf: androidDevices)
+                } catch {
+                    errors.append("Android scan error: \(error.localizedDescription)")
+                }
+                
+                // Update the devices list on the main thread
                 await MainActor.run {
-                    self.devices = iosDevices + androidDevices
-                    self.lastError = nil
+                    self.devices = allDevices
+                    if !errors.isEmpty {
+                        self.lastError = errors.joined(separator: "\n")
+                    } else {
+                        self.lastError = nil
+                    }
                 }
             } catch {
-                logger.error("Device scan failed: \(error.localizedDescription)")
                 await MainActor.run {
                     self.lastError = error.localizedDescription
+                    logger.error("Device scan failed: \(error.localizedDescription)")
                 }
             }
         }
@@ -67,36 +90,46 @@ class DeviceManager: ObservableObject {
     private func scanIOSDevices() async throws -> [Device] {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = ["devicectl", "list", "devices", "--json"]
+        
+        // Updated command arguments to match correct syntax
+        process.arguments = ["devicectl", "list", "devices", "--json-output", "-"]
         
         let outputPipe = Pipe()
         let errorPipe = Pipe()
         process.standardOutput = outputPipe
         process.standardError = errorPipe
         
-        try process.run()
-        
-        let outputData = try await outputPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
-        let errorData = try await errorPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
-        
-        if !errorData.isEmpty {
-            let errorString = String(decoding: errorData, as: UTF8.self)
-            logger.error("devicectl error: \(errorString)")
-            throw DeviceScanError.processError(errorString)
-        }
-        
-        // Parse JSON output from devicectl
-        let response = try JSONDecoder().decode(DeviceCtlResponse.self, from: outputData)
-        
-        // Process devices sequentially using async/await
-        var devices: [Device] = []
-        for deviceInfo in response.devices {
-            if let device = try await createIOSDevice(from: deviceInfo) {
-                devices.append(device)
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            if process.terminationStatus != 0 {
+                let errorData = try await errorPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
+                let errorString = String(decoding: errorData, as: UTF8.self)
+                logger.error("devicectl error: \(errorString)")
+                throw DeviceScanError.processError(errorString)
             }
+            
+            let outputData = try await outputPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
+            
+            // Add debug logging
+            let outputString = String(decoding: outputData, as: UTF8.self)
+            logger.debug("Device scan output: \(outputString)")
+            
+            let response = try JSONDecoder().decode(DeviceCtlResponse.self, from: outputData)
+            
+            var devices: [Device] = []
+            for deviceInfo in response.devices {
+                if let device = try await createIOSDevice(from: deviceInfo) {
+                    devices.append(device)
+                }
+            }
+            
+            return devices
+        } catch {
+            logger.error("Failed to scan iOS devices: \(error.localizedDescription)")
+            throw DeviceScanError.processError(error.localizedDescription)
         }
-        
-        return devices
     }
     
     private func createIOSDevice(from info: DeviceCtlDevice) async throws -> Device? {
@@ -120,15 +153,19 @@ class DeviceManager: ObservableObject {
     }
     
     private func scanAndroidDevices() async throws -> [Device] {
-        // First check if adb exists
-        let adbPath = "/usr/local/bin/adb"
-        guard FileManager.default.fileExists(atPath: adbPath) else {
-            logger.error("ADB not found at \(adbPath)")
-            throw DeviceScanError.commandNotFound("Android Debug Bridge (adb) not found. Please install Android SDK command-line tools.")
+        // First, try to start ADB server if it's not running
+        do {
+            let startServerProcess = Process()
+            startServerProcess.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
+            startServerProcess.arguments = ["start-server"]
+            try startServerProcess.run()
+            startServerProcess.waitUntilExit()
+        } catch {
+            logger.error("Failed to start ADB server: \(error.localizedDescription)")
         }
         
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: adbPath)
+        process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
         process.arguments = ["devices", "-l"]
         
         let outputPipe = Pipe()
@@ -136,74 +173,97 @@ class DeviceManager: ObservableObject {
         process.standardOutput = outputPipe
         process.standardError = errorPipe
         
-        try process.run()
-        
-        let outputData = try await outputPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
-        let errorData = try await errorPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
-        
-        if !errorData.isEmpty {
-            let errorString = String(decoding: errorData, as: UTF8.self)
-            if errorString.contains("daemon started successfully") {
-                // ADB server just started, retry the scan
-                return try await scanAndroidDevices()
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            let outputData = try await outputPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
+            let outputString = String(decoding: outputData, as: UTF8.self)
+            
+            // Debug logging
+            logger.debug("ADB devices output: \(outputString)")
+            
+            if process.terminationStatus != 0 {
+                let errorData = try await errorPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
+                let errorString = String(decoding: errorData, as: UTF8.self)
+                logger.error("ADB error: \(errorString)")
+                
+                // If ADB server is not running, start it and retry
+                if errorString.contains("adb server") {
+                    logger.info("ADB server not running, attempting to start it...")
+                    return try await scanAndroidDevices() // Retry after starting server
+                }
+                throw DeviceScanError.processError(errorString)
             }
-            throw DeviceScanError.processError(errorString)
-        }
-        
-        let output = String(decoding: outputData, as: UTF8.self)
-        let lines = output.components(separatedBy: .newlines)
-            .filter { !$0.isEmpty && !$0.contains("List of devices attached") }
-        
-        var devices: [Device] = []
-        for line in lines {
-            let components = line.components(separatedBy: .whitespaces)
-                .filter { !$0.isEmpty }
             
-            guard components.count >= 2 else { continue }
+            // Parse adb devices output
+            var devices: [Device] = []
+            let lines = outputString.components(separatedBy: .newlines)
+                .filter { !$0.isEmpty && !$0.contains("List of devices attached") }
             
-            let identifier = components[0]
-            let status = components[1]
-            
-            guard status == "device" else { continue } // Skip unauthorized/offline devices
-            
-            // Parse device properties
-            var properties: [String: String] = ["identifier": identifier]
-            components[2...].forEach { prop in
-                let keyValue = prop.split(separator: ":")
-                if keyValue.count == 2 {
-                    properties[String(keyValue[0])] = String(keyValue[1])
+            for line in lines {
+                let components = line.components(separatedBy: .whitespaces)
+                    .filter { !$0.isEmpty }
+                
+                guard components.count >= 2 else { continue }
+                
+                let identifier = components[0]
+                let status = components[1]
+                
+                // Only add authorized devices
+                if status == "device" {
+                    // Get device name
+                    let name = try await getAndroidDeviceName(identifier) ?? "Android Device"
+                    
+                    // Get additional properties
+                    var properties: [String: String] = [:]
+                    if components.count > 2 {
+                        components[2...].forEach { prop in
+                            let keyValue = prop.split(separator: ":")
+                            if keyValue.count == 2 {
+                                properties[String(keyValue[0])] = String(keyValue[1])
+                            }
+                        }
+                    }
+                    
+                    let device = Device(
+                        name: name,
+                        type: .android,
+                        status: "Connected",
+                        identifier: identifier,
+                        properties: properties
+                    )
+                    devices.append(device)
+                    logger.info("Found Android device: \(name) (\(identifier))")
                 }
             }
             
-            // Get device model name
-            if let modelName = try await getAndroidDeviceModel(identifier: identifier) {
-                let device = Device(
-                    name: modelName,
-                    type: .android,
-                    status: "Connected",
-                    identifier: identifier,
-                    properties: properties
-                )
-                devices.append(device)
-            }
+            return devices
+        } catch {
+            logger.error("Failed to scan Android devices: \(error.localizedDescription)")
+            throw DeviceScanError.processError(error.localizedDescription)
         }
-        
-        return devices
     }
     
-    private func getAndroidDeviceModel(identifier: String) async throws -> String? {
+    private func getAndroidDeviceName(_ identifier: String) async throws -> String? {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/local/bin/adb")
+        process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
         process.arguments = ["-s", identifier, "shell", "getprop", "ro.product.model"]
         
         let outputPipe = Pipe()
+        let errorPipe = Pipe()
         process.standardOutput = outputPipe
+        process.standardError = errorPipe
         
         try process.run()
-        let outputData = try await outputPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
-        let model = String(decoding: outputData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+        process.waitUntilExit()
         
-        return model.isEmpty ? nil : model
+        if process.terminationStatus == 0 {
+            let outputData = try await outputPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
+            let name = String(decoding: outputData, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            return name.isEmpty ? nil : name
+        }
+        return nil
     }
     
     // Device operations
@@ -237,7 +297,7 @@ class DeviceManager: ObservableObject {
     
     private func installAndroidApp(device: Device, appPath: String) async throws {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/local/bin/adb")
+        process.executableURL = URL(fileURLWithPath: adbPath)
         process.arguments = ["-s", device.identifier, "install", "-r", appPath]
         
         let errorPipe = Pipe()
@@ -293,26 +353,43 @@ class DeviceManager: ObservableObject {
             
         case .android:
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/adb")
+            process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
             process.arguments = ["-s", device.identifier, "reboot"]
             try await executeProcess(process)
         }
     }
     
-    func clearAppData(_ device: Device, bundleId: String) async throws {
-        logger.info("Clearing app data for \(bundleId) on \(device.name)")
+    func clearAppData(device: Device, bundleId: String) async throws {
         switch device.type {
         case .ios:
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-            process.arguments = ["devicectl", "device", "uninstall", device.identifier, bundleId]
-            try await executeProcess(process)
-            
+            try await clearIOSAppData(device: device, bundleId: bundleId)
         case .android:
-            let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/adb")
-            process.arguments = ["-s", device.identifier, "shell", "pm", "clear", bundleId]
-            try await executeProcess(process)
+            try await clearAndroidAppData(device: device, bundleId: bundleId)
+        }
+    }
+    
+    private func clearIOSAppData(device: Device, bundleId: String) async throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = ["devicectl", "device", "uninstall", device.identifier, bundleId]
+        try await executeProcess(process)
+    }
+    
+    private func clearAndroidAppData(device: Device, bundleId: String) async throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: adbPath)
+        process.arguments = ["-s", device.identifier, "shell", "pm", "clear", bundleId]
+        
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        
+        try process.run()
+        process.waitUntilExit()
+        
+        if process.terminationStatus != 0 {
+            let errorData = try await errorPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
+            let errorString = String(decoding: errorData, as: UTF8.self)
+            throw DeviceScanError.processError("Failed to clear app data: \(errorString)")
         }
     }
     
@@ -329,13 +406,13 @@ class DeviceManager: ObservableObject {
             
         case .android:
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/adb")
+            process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
             process.arguments = ["-s", device.identifier, "shell", "screenrecord", "/sdcard/recording.mp4"]
             try await executeProcess(process)
             
             // Pull recording from device
             let pullProcess = Process()
-            pullProcess.executableURL = URL(fileURLWithPath: "/usr/local/bin/adb")
+            pullProcess.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
             pullProcess.arguments = ["-s", device.identifier, "pull", "/sdcard/recording.mp4", recordingURL.path]
             try await executeProcess(pullProcess)
         }
@@ -344,27 +421,57 @@ class DeviceManager: ObservableObject {
     }
     
     func startScreenRecording(for device: Device) async throws {
-        guard recordingProcesses[device.identifier] == nil else {
-            throw DeviceScanError.processError("Recording already in progress")
-        }
-        
-        logger.info("Starting screen recording for device: \(device.name)")
-        
-        let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString)
-            .appendingPathExtension("mp4")
-        
         switch device.type {
         case .ios:
-            try await startIOSRecording(device: device, outputURL: outputURL)
+            try await startIOSScreenRecording(device: device)
         case .android:
-            try await startAndroidRecording(device: device, outputURL: outputURL)
+            try await startAndroidScreenRecording(device: device)
         }
-        
-        recordingPaths[device.identifier] = outputURL
     }
     
     func stopScreenRecording(for device: Device) async throws -> URL {
+        switch device.type {
+        case .ios:
+            return try await stopIOSScreenRecording(device: device)
+        case .android:
+            return try await stopAndroidScreenRecording(device: device)
+        }
+    }
+    
+    private func startIOSScreenRecording(device: Device) async throws {
+        let recordingURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mp4")
+        
+        recordingPaths[device.identifier] = recordingURL
+        
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
+        process.arguments = [
+            "simctl", "io", device.identifier, "recordVideo",
+            "--codec", "h264",
+            "--mask", "ignored",
+            "--force",
+            recordingURL.path
+        ]
+        
+        try process.run()
+        recordingProcesses[device.identifier] = process
+    }
+    
+    private func startAndroidScreenRecording(device: Device) async throws {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: adbPath)
+        process.arguments = ["-s", device.identifier, "shell", "screenrecord", "/sdcard/recording.mp4"]
+        
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
+        
+        try process.run()
+        // Don't wait for completion as it records until stopped
+    }
+    
+    private func stopIOSScreenRecording(device: Device) async throws -> URL {
         guard let process = recordingProcesses[device.identifier],
               let outputURL = recordingPaths[device.identifier] else {
             throw DeviceScanError.processError("No active recording found")
@@ -372,15 +479,7 @@ class DeviceManager: ObservableObject {
         
         logger.info("Stopping screen recording for device: \(device.name)")
         
-        switch device.type {
-        case .ios:
-            process.terminate()
-        case .android:
-            // Send Ctrl+C to stop Android recording
-            let pid = process.processIdentifier
-            kill(pid, SIGINT)
-        }
-        
+        process.terminate()
         process.waitUntilExit()
         recordingProcesses.removeValue(forKey: device.identifier)
         recordingPaths.removeValue(forKey: device.identifier)
@@ -389,75 +488,91 @@ class DeviceManager: ObservableObject {
         return try await optimizeVideo(at: outputURL, for: device)
     }
     
-    private func startIOSRecording(device: Device, outputURL: URL) async throws {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
-        process.arguments = [
-            "simctl", "io", device.identifier, "recordVideo",
-            "--codec", "h264",
-            "--mask", "ignored",
-            "--force",
-            outputURL.path
-        ]
+    private func stopAndroidScreenRecording(device: Device) async throws -> URL {
+        // First, kill the screenrecord process
+        let killProcess = Process()
+        killProcess.executableURL = URL(fileURLWithPath: adbPath)
+        killProcess.arguments = ["-s", device.identifier, "shell", "killall", "screenrecord"]
+        try killProcess.run()
+        killProcess.waitUntilExit()
         
-        try process.run()
-        recordingProcesses[device.identifier] = process
-    }
-    
-    private func startAndroidRecording(device: Device, outputURL: URL) async throws {
-        let tempPath = "/sdcard/recording.mp4"
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/local/bin/adb")
-        process.arguments = [
-            "-s", device.identifier,
-            "shell", "screenrecord",
-            "--bit-rate", "8000000", // 8Mbps
-            "--size", "1280x720", // 720p
-            tempPath
-        ]
+        // Wait a moment for the file to be saved
+        try await Task.sleep(nanoseconds: 1_000_000_000)
         
-        try process.run()
-        recordingProcesses[device.identifier] = process
+        // Create temporary directory for the recording
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
         
-        // When stopped, we'll need to pull the file from the device
-        // and delete the temporary file
-        try await pullAndroidRecording(device: device, tempPath: tempPath, outputURL: outputURL)
-    }
-    
-    private func pullAndroidRecording(device: Device, tempPath: String, outputURL: URL) async throws {
+        let localPath = tempDir.appendingPathComponent("recording.mp4")
+        
+        // Pull the recording from device
         let pullProcess = Process()
-        pullProcess.executableURL = URL(fileURLWithPath: "/usr/local/bin/adb")
-        pullProcess.arguments = ["-s", device.identifier, "pull", tempPath, outputURL.path]
-        try await executeProcess(pullProcess)
+        pullProcess.executableURL = URL(fileURLWithPath: adbPath)
+        pullProcess.arguments = ["-s", device.identifier, "pull", "/sdcard/recording.mp4", localPath.path]
         
-        // Clean up temp file
+        let errorPipe = Pipe()
+        pullProcess.standardError = errorPipe
+        
+        try pullProcess.run()
+        pullProcess.waitUntilExit()
+        
+        if pullProcess.terminationStatus != 0 {
+            let errorData = try await errorPipe.fileHandleForReading.bytes.reduce(into: Data()) { $0.append($1) }
+            let errorString = String(decoding: errorData, as: UTF8.self)
+            throw DeviceScanError.processError("Failed to get recording: \(errorString)")
+        }
+        
+        // Clean up the recording on device
         let cleanupProcess = Process()
-        cleanupProcess.executableURL = URL(fileURLWithPath: "/usr/local/bin/adb")
-        cleanupProcess.arguments = ["-s", device.identifier, "shell", "rm", tempPath]
-        try await executeProcess(cleanupProcess)
+        cleanupProcess.executableURL = URL(fileURLWithPath: adbPath)
+        cleanupProcess.arguments = ["-s", device.identifier, "shell", "rm", "/sdcard/recording.mp4"]
+        try cleanupProcess.run()
+        cleanupProcess.waitUntilExit()
+        
+        return localPath
     }
     
-    private func optimizeVideo(at url: URL, for device: Device) async throws -> URL {
-        let optimizedURL = url.deletingPathExtension().appendingPathExtension("optimized.mp4")
+    private func optimizeVideo(at inputURL: URL, for device: Device) async throws -> URL {
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+            .appendingPathExtension("mp4")
         
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/local/bin/ffmpeg")
+        
+        // Compression settings
         process.arguments = [
-            "-i", url.path,
-            "-c:v", "libx264",
-            "-preset", "medium",
-            "-crf", "23", // Balance between quality and size
-            "-movflags", "+faststart", // Enable streaming
-            "-y", // Overwrite output file
-            optimizedURL.path
+            "-i", inputURL.path,
+            "-vf", "scale=1280:-1", // Scale width to 1280px, maintain aspect ratio
+            "-c:v", "h264",
+            "-preset", "fast",
+            "-crf", "23", // Compression quality (18-28 is good, lower = better quality)
+            "-c:a", "aac",
+            "-b:a", "128k",
+            outputURL.path
         ]
         
-        try await executeProcess(process)
+        let errorPipe = Pipe()
+        process.standardError = errorPipe
         
-        // Clean up original file
-        try FileManager.default.removeItem(at: url)
-        
-        return optimizedURL
+        do {
+            try process.run()
+            process.waitUntilExit()
+            
+            if process.terminationStatus == 0 {
+                // Delete original file
+                try? FileManager.default.removeItem(at: inputURL)
+                return outputURL
+            } else {
+                // If compression fails, return original file
+                logger.error("Video compression failed, using original file")
+                return inputURL
+            }
+        } catch {
+            logger.error("Failed to compress video: \(error.localizedDescription)")
+            return inputURL // Return original file if compression fails
+        }
     }
     
     private func executeProcess(_ process: Process) async throws {
@@ -485,7 +600,7 @@ class DeviceManager: ObservableObject {
             process.executableURL = URL(fileURLWithPath: "/usr/local/bin/ideviceinstaller")
             process.arguments = ["-u", device.identifier, "--command", command]
         } else {
-            process.executableURL = URL(fileURLWithPath: "/usr/local/bin/adb")
+            process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
             process.arguments = ["-s", device.identifier, "shell", command]
         }
         

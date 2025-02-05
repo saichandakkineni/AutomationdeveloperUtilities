@@ -2,6 +2,7 @@ import SwiftUI
 import AVKit
 
 struct ScreenRecordingView: View {
+    @Environment(\.dismiss) private var dismiss
     let device: Device
     @State private var isRecording = false
     @State private var recordingURL: URL?
@@ -11,11 +12,23 @@ struct ScreenRecordingView: View {
     
     var body: some View {
         VStack(spacing: 20) {
+            // Back button
+            HStack {
+                Button(action: { dismiss() }) {
+                    Label("Back", systemImage: "chevron.left")
+                }
+                .buttonStyle(.bordered)
+                Spacer()
+            }
+            
             // Video preview
             if let player = player {
                 VideoPlayer(player: player)
                     .frame(height: 400)
                     .clipShape(RoundedRectangle(cornerRadius: 12))
+                    .onAppear {
+                        player.play() // Auto-play when preview is shown
+                    }
             }
             
             // Controls
@@ -53,6 +66,7 @@ struct ScreenRecordingView: View {
             }
         }
         .padding()
+        .navigationBarBackButtonHidden(true)
     }
     
     private func toggleRecording() async {

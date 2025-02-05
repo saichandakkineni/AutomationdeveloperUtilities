@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.app-sandbox</key>
+    <false/>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+    <key>com.apple.security.device.usb</key>
+    <true/>
+    <key>com.apple.security.temporary-exception.apple-events</key>
+    <array>
+        <string>com.apple.dt.Xcode</string>
+    </array>
+    <key>com.apple.security.temporary-exception.files.absolute-path.read-write</key>
+    <array>
+        <string>/</string>
+        <string>/usr/local/bin</string>
+        <string>/usr/bin</string>
+        <string>/usr/local/bin/ffmpeg</string>
+        <string>/Library/Developer/CommandLineTools</string>
+        <string>/Applications/Xcode.app</string>
+        <string>/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb</string>
+        <string>$(HOME)/Downloads</string>
+        <string>$(HOME)/Documents</string>
+    </array>
+    <key>com.apple.security.temporary-exception.mach-lookup.global-name</key>
+    <array>
+        <string>com.apple.dt.Xcode.LookupService</string>
+        <string>com.apple.dt.devicectl</string>
+    </array>
+    <key>com.apple.security.temporary-exception.sbpl</key>
+    <array>
+        <string>(allow network-outbound)</string>
+        <string>(allow system-socket)</string>
+        <string>(allow mach-lookup)</string>
+    </array>
+</dict>
+</plist> 
