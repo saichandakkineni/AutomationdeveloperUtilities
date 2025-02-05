@@ -24,7 +24,7 @@
         <string>/usr/local/bin/ffmpeg</string>
         <string>/Library/Developer/CommandLineTools</string>
         <string>/Applications/Xcode.app</string>
-        <string>/Users/SAICHAND.Z.Akkineni@td.com/Library/Android/sdk/platform-tools/adb</string>
+        <string>$(HOME)/Library/Android/sdk/platform-tools/adb</string>
         <string>$(HOME)/Downloads</string>
         <string>$(HOME)/Documents</string>
     </array>

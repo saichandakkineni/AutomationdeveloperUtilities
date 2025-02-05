@@ -28,8 +28,8 @@ class DeviceManager: ObservableObject {
     private var recordingProcesses: [String: Process] = [:]
     private var recordingPaths: [String: URL] = [:]
     
-    // Update ADB path
-    private let adbPath = "/Users/SAICHAND.Z.Akkineni@td.com/Library/Android/sdk/platform-tools/adb"
+    // Update ADB path to use home directory
+    private let adbPath = "\(FileManager.default.homeDirectoryForCurrentUser.path)/Library/Android/sdk/platform-tools/adb"
     
     init() {
         startDeviceScan()
