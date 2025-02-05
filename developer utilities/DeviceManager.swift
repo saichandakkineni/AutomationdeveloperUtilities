@@ -29,7 +29,7 @@ class DeviceManager: ObservableObject {
     private var recordingPaths: [String: URL] = [:]
     
     // Update ADB path
-    private let adbPath = "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb"
+    private let adbPath = "/Users/SAICHAND.Z.Akkineni@td.com/Library/Android/sdk/platform-tools/adb"
     
     init() {
         startDeviceScan()
@@ -156,7 +156,7 @@ class DeviceManager: ObservableObject {
         // First, try to start ADB server if it's not running
         do {
             let startServerProcess = Process()
-            startServerProcess.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
+            startServerProcess.executableURL = URL(fileURLWithPath: "/Users/SAICHAND.Z.Akkineni@td.com/Library/Android/sdk/platform-tools/adb")
             startServerProcess.arguments = ["start-server"]
             try startServerProcess.run()
             startServerProcess.waitUntilExit()
@@ -165,7 +165,7 @@ class DeviceManager: ObservableObject {
         }
         
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
+        process.executableURL = URL(fileURLWithPath: "/Users/SAICHAND.Z.Akkineni@td.com/Library/Android/sdk/platform-tools/adb")
         process.arguments = ["devices", "-l"]
         
         let outputPipe = Pipe()
@@ -247,7 +247,7 @@ class DeviceManager: ObservableObject {
     
     private func getAndroidDeviceName(_ identifier: String) async throws -> String? {
         let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
+        process.executableURL = URL(fileURLWithPath: "/Users/SAICHAND.Z.Akkineni@td.com/Library/Android/sdk/platform-tools/adb")
         process.arguments = ["-s", identifier, "shell", "getprop", "ro.product.model"]
         
         let outputPipe = Pipe()
@@ -353,7 +353,7 @@ class DeviceManager: ObservableObject {
             
         case .android:
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
+            process.executableURL = URL(fileURLWithPath: "/Users/SAICHAND.Z.Akkineni@td.com/Library/Android/sdk/platform-tools/adb")
             process.arguments = ["-s", device.identifier, "reboot"]
             try await executeProcess(process)
         }
@@ -406,13 +406,13 @@ class DeviceManager: ObservableObject {
             
         case .android:
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
+            process.executableURL = URL(fileURLWithPath: "/Users/SAICHAND.Z.Akkineni@td.com/Library/Android/sdk/platform-tools/adb")
             process.arguments = ["-s", device.identifier, "shell", "screenrecord", "/sdcard/recording.mp4"]
             try await executeProcess(process)
             
             // Pull recording from device
             let pullProcess = Process()
-            pullProcess.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
+            pullProcess.executableURL = URL(fileURLWithPath: "/Users/SAICHAND.Z.Akkineni@td.com/Library/Android/sdk/platform-tools/adb")
             pullProcess.arguments = ["-s", device.identifier, "pull", "/sdcard/recording.mp4", recordingURL.path]
             try await executeProcess(pullProcess)
         }
@@ -600,7 +600,7 @@ class DeviceManager: ObservableObject {
             process.executableURL = URL(fileURLWithPath: "/usr/local/bin/ideviceinstaller")
             process.arguments = ["-u", device.identifier, "--command", command]
         } else {
-            process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
+            process.executableURL = URL(fileURLWithPath: "/Users/SAICHAND.Z.Akkineni@td.com/Library/Android/sdk/platform-tools/adb")
             process.arguments = ["-s", device.identifier, "shell", command]
         }
         

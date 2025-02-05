@@ -69,7 +69,7 @@ class LogManager: ObservableObject {
             process.executableURL = URL(fileURLWithPath: "/usr/bin/xcrun")
             process.arguments = ["simctl", "spawn", device.identifier, "log", "stream", "--level", "debug"]
         } else {
-            process.executableURL = URL(fileURLWithPath: "/Users/saichandakkineni/Library/Android/sdk/platform-tools/adb")
+            process.executableURL = URL(fileURLWithPath: "/Users/SAICHAND.Z.Akkineni@td.com/Library/Android/sdk/platform-tools/adb")
             process.arguments = ["-s", device.identifier, "logcat", "*:D"]
         }
         
